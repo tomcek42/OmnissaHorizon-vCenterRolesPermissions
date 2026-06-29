@@ -1,0 +1,14 @@
+{
+    "vCenter": {
+        "Server": "vcenter.example.local",
+        "Username": "svc-appvolumes@vsphere.local",
+        "CredentialPath": "vcenter-credential.xml",
+        "IgnoreCertificateErrors": false
+    },
+    "Role": {
+        "Name": "AppVolumes",
+        "Description": "Custom role for the Omnissa App Volumes Manager service account",
+        "IncludeCryptographicOperations": false,
+        "Overwrite": false
+    }
+}

@@ -1,0 +1,21 @@
+# Verschluesselte vCenter-Anmeldeinformationen (niemals einchecken!)
+vcenter-credential.xml
+*.cred
+*.clixml
+
+# Lokale/abweichende Konfigurationen mit echten Werten
+config.local.json
+
+# PowerCLI / PowerShell
+*.log
+
+# Lokale Tool-/Editor-Konfiguration
+.claude/
+
+# Urheberrechtlich geschuetzte Omnissa-Doku (nicht oeffentlich verteilen)
+*.pdf
+
+# Betriebssystem
+Thumbs.db
+Desktop.ini
+.DS_Store

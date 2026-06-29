@@ -1,0 +1,66 @@
+Provisioning:
+	Clone template
+	Clone virtual machine
+	Create template from virtual machine
+	Customize
+	Deploy template
+	Mark as template
+	Mark as virtual machine
+	Modify customization specifications
+	Read customization specifications
+	Promote disks
+
+Inventory:
+	Create from existing
+	Create new
+	Move
+	Register
+	Remove
+	Unregister
+
+Interaction:
+	Power Off
+	Power On
+	Suspend
+
+Virtual machine:Configuration:
+	Add existing disk
+	Add new disk
+	Add or remove device
+	Change resource
+	Query unowned files
+	Remove disk
+	Settings
+	Advanced
+	
+Tasks:
+	Create task
+	
+Sessions:
+	View and stop sessions
+	
+Resource:
+	Assign virtual machine to resource pool
+	
+Host:Local operations:
+	Create virtual machine
+	Delete virtual machine
+	Reconfigure virtual machine
+	
+Cryptographic Operations:
+	Direct Access
+	Add Disk
+
+Datastore:
+	Allocate space
+	Browse datastore
+	Low level file operations
+	Remove file
+	Update virtual machine files
+
+Folder:
+	Create folder
+	Delete folder
+
+Global:
+	Cancel task
