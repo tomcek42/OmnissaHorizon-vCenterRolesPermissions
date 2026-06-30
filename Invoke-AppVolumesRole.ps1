@@ -190,6 +190,56 @@ function New-StrongPassword {
     return (-join $chars)
 }
 
+function Write-Banner {
+    param([string]$Title)
+    $line = '=' * 64
+    Write-Host ""
+    Write-Host $line -ForegroundColor Cyan
+    Write-Host ("  " + $Title) -ForegroundColor Cyan
+    Write-Host $line -ForegroundColor Cyan
+}
+
+function Write-Section {
+    param([string]$Title)
+    Write-Host ""
+    Write-Host "-- $Title " -ForegroundColor Cyan -NoNewline
+    Write-Host ('-' * [Math]::Max(0, 60 - $Title.Length)) -ForegroundColor DarkCyan
+}
+
+function Write-Field {
+    param([string]$Label, [string]$Value)
+    Write-Host ("   {0,-16}: " -f $Label) -ForegroundColor Gray -NoNewline
+    Write-Host $Value -ForegroundColor White
+}
+
+function Resolve-RequiredModule {
+    param([string]$CheckName, [string]$InstallName)
+    if (Get-Module -ListAvailable -Name $CheckName) {
+        Write-Host "   [ OK ] $CheckName" -ForegroundColor Green
+        return $true
+    }
+    Write-Host "   [MISS] $CheckName" -ForegroundColor Yellow
+    if (-not $NonInteractive) {
+        if (Read-YesNo -Prompt "          Install '$InstallName' now (Scope CurrentUser)?" -Default $true) {
+            try {
+                Install-Module -Name $InstallName -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+                if (Get-Module -ListAvailable -Name $CheckName) {
+                    Write-Host "   [ OK ] Installed $CheckName" -ForegroundColor Green
+                    return $true
+                }
+            }
+            catch {
+                Write-Host "   [FAIL] Install failed: $($_.Exception.Message)" -ForegroundColor Red
+            }
+        }
+    }
+    Write-Host "          Install manually: Install-Module $InstallName -Scope CurrentUser" -ForegroundColor Yellow
+    return $false
+}
+
+Write-Banner 'App Volumes - vCenter Role Setup'
+Write-Section 'Configuration'
+
 # --- Working directory and configuration --------------------------------------
 # Prefer the directory of the .ps1 file (config/credential live next to the
 # script). When run via 'irm <URL> | iex' there is no file -> fall back to the
@@ -276,8 +326,11 @@ if ($svcEnabled) {
     if ($ServiceAccountMode) { $svcMode = $ServiceAccountMode }
     elseif ($cfgSvc -and $cfgSvc.Mode) { $svcMode = $cfgSvcMode }
     elseif (-not $NonInteractive) {
-        $ans = Read-DefaultedValue -Prompt "Service account mode: 'Create' new SSO user or 'AssignExisting'" -Default 'Create'
-        $svcMode = if ($ans -match '^[Aa]') { 'AssignExisting' } else { 'Create' }
+        Write-Host "   Service account mode:" -ForegroundColor Gray
+        Write-Host "     [1] Create a new vCenter SSO user (vsphere.local)" -ForegroundColor White
+        Write-Host "     [2] Assign an existing principal (e.g. an AD account)" -ForegroundColor White
+        $ans = Read-DefaultedValue -Prompt "   Select" -Default '1'
+        $svcMode = if ($ans -match '^\s*2' -or $ans -match '^[Aa]') { 'AssignExisting' } else { 'Create' }
     }
     if ($svcMode -notin @('Create', 'AssignExisting')) {
         throw "ServiceAccountMode must be 'Create' or 'AssignExisting' (got '$svcMode')."
@@ -325,9 +378,15 @@ $configObject = [ordered]@{
 $configObject | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $ConfigPath -Encoding UTF8
 Write-Host "Configuration saved: $ConfigPath" -ForegroundColor DarkGray
 
-# --- Load PowerCLI ------------------------------------------------------------
-if (-not (Get-Module -ListAvailable -Name 'VMware.VimAutomation.Core')) {
-    throw 'PowerCLI (VMware.VimAutomation.Core) is not installed. Run "Install-Module VMware.PowerCLI -Scope CurrentUser" first.'
+# --- Preflight: required modules ----------------------------------------------
+Write-Section 'Required PowerShell modules'
+$modulesOk = $true
+if (-not (Resolve-RequiredModule -CheckName 'VMware.VimAutomation.Core' -InstallName 'VMware.PowerCLI')) { $modulesOk = $false }
+if ($svcEnabled -and $svcMode -eq 'Create') {
+    if (-not (Resolve-RequiredModule -CheckName 'VMware.vSphere.SsoAdmin' -InstallName 'VMware.vSphere.SsoAdmin')) { $modulesOk = $false }
+}
+if (-not $modulesOk) {
+    throw 'One or more required modules are missing. Install them (see above) and re-run.'
 }
 Import-Module 'VMware.VimAutomation.Core' -ErrorAction Stop
 
@@ -362,6 +421,21 @@ else {
     Write-Host "Not including Cryptographic Operations." -ForegroundColor Cyan
 }
 
+# --- Summary ------------------------------------------------------------------
+Write-Section 'Summary'
+Write-Field 'vCenter'      $viServer
+Write-Field 'User'         $vcUser
+Write-Field 'Role'         $roleName
+Write-Field 'Crypto ops'   $(if ($includeCrypto) { 'included' } else { 'excluded' })
+Write-Field 'Ignore cert'  $(if ($ignoreCert) { 'yes' } else { 'no' })
+if ($svcEnabled) {
+    Write-Field 'Service acct' $(if ($svcMode -eq 'Create') { "create  $svcPrincipal" } else { "assign  $svcPrincipal" })
+    Write-Field 'Permission'   'vCenter root (propagated)'
+}
+else {
+    Write-Field 'Service acct' 'skipped'
+}
+
 # --- Connect and create the role ----------------------------------------------
 $connection = $null
 $ssoConnection = $null
@@ -391,9 +465,10 @@ try {
         $resultRole = New-VIRole -Name $roleName -Privilege $privileges -Server $connection -ErrorAction Stop
     }
 
+    # Note: neither PowerCLI nor the vSphere API support setting a description on a
+    # custom role, so the description is kept in config.json for documentation only.
     if (-not [string]::IsNullOrWhiteSpace($roleDescription)) {
-        try { Set-VIRole -Role $resultRole -Description $roleDescription -Server $connection -ErrorAction Stop | Out-Null }
-        catch { Write-Host "Note: could not set description ($($_.Exception.Message))." -ForegroundColor DarkYellow }
+        Write-Host "Role description recorded in config.json (vCenter does not accept role descriptions via PowerCLI)." -ForegroundColor DarkGray
     }
 
     $finalRole = Get-VIRole -Server $connection -Name $roleName
@@ -427,11 +502,13 @@ try {
                 New-SsoPersonUser -UserName $svcName -Password $generatedPassword -Description $svcDesc -Server $ssoConnection | Out-Null
                 Write-Host "Created SSO user '$svcDomain\$svcName'." -ForegroundColor Green
                 Write-Host ""
-                Write-Host "==================== SERVICE ACCOUNT PASSWORD ====================" -ForegroundColor Magenta
-                Write-Host "  User:     $svcDomain\$svcName"                                    -ForegroundColor Magenta
-                Write-Host "  Password: $generatedPassword"                                     -ForegroundColor Magenta
-                Write-Host "  Store this now - it is shown only once and is not saved anywhere." -ForegroundColor Magenta
-                Write-Host "=================================================================" -ForegroundColor Magenta
+                Write-Host "  +------------------------------------------------------------+" -ForegroundColor Yellow
+                Write-Host "  |                 SERVICE ACCOUNT PASSWORD                   |" -ForegroundColor Yellow
+                Write-Host "  +------------------------------------------------------------+" -ForegroundColor Yellow
+                Write-Host "    User    : $svcDomain\$svcName" -ForegroundColor White
+                Write-Host -NoNewline "    Password: " -ForegroundColor White
+                Write-Host " $generatedPassword " -ForegroundColor Black -BackgroundColor White
+                Write-Host "    Shown only once - store it now; it is not saved anywhere." -ForegroundColor Yellow
                 Write-Host ""
             }
         }

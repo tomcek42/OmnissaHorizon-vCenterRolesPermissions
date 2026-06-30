@@ -32,8 +32,13 @@ role. When enabled it either:
 
 and grants the role as a permission at the **vCenter root** (propagated).
 
-> Creating an SSO user requires the `VMware.vSphere.SsoAdmin` module:
-> `Install-Module VMware.vSphere.SsoAdmin -Scope CurrentUser`
+The script checks for the required modules up front and offers to install any
+that are missing. Creating an SSO user requires the `VMware.vSphere.SsoAdmin`
+module (`Install-Module VMware.vSphere.SsoAdmin -Scope CurrentUser`).
+
+> Note: a vCenter role description cannot be set via PowerCLI/the vSphere API, so
+> the role description is kept in `config.json` for documentation only. The
+> service account, however, does get the description applied.
 
 ## Requirements
 
