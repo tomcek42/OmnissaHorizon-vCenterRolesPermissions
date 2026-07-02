@@ -85,10 +85,15 @@ permission is touched.
 | `Invoke-OmnissaHorizon_VMwarevCenter.ps1` | The script (self-contained, interactive, menu-driven). |
 | `Instant-Clone_PrivilegeList.json` | Reference export of the Instant Clone privileges. |
 | `permissions.txt` | Reference list of the App Volumes GUI privileges. |
+| `CHANGELOG.md` | Version history and notable changes. |
 
 On first run the script writes a `config.json` and the encrypted credential file to
 its working directory and reuses them on later runs. `config.json` keeps a shared
 `vCenter` section and a per-product section under `Products`.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for the version history and notable changes.
 
 ## Credentials
 
