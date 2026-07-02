@@ -271,6 +271,63 @@ function Write-Field {
     Write-Host $Value -ForegroundColor White
 }
 
+function Test-IsAdministrator {
+    # True when the current PowerShell process is running with an elevated token.
+    try {
+        $identity  = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+        return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+    }
+    catch { return $false }
+}
+
+function Install-ModuleElevated {
+    # Relaunch an elevated instance of the current PowerShell host that installs
+    # the given module(s) system-wide (Scope AllUsers), wait for it, then return
+    # whether it exited successfully. The current session keeps its state; once
+    # the elevated child finishes, Get-Module -ListAvailable will find the module
+    # via the AllUsers module path.
+    param([string[]]$InstallName)
+
+    $hostExe = try { (Get-Process -Id $PID).Path } catch { $null }
+    if ([string]::IsNullOrWhiteSpace($hostExe)) {
+        $hostExe = if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh.exe' } else { 'powershell.exe' }
+    }
+
+    $names = ($InstallName | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ', '
+    $script = @"
+`$ErrorActionPreference = 'Stop'
+try {
+    if (-not (Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue)) {
+        Install-PackageProvider -Name NuGet -Force -Scope AllUsers | Out-Null
+    }
+    Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+    foreach (`$n in @($names)) {
+        Write-Host "Installing `$n (Scope AllUsers) ..." -ForegroundColor Cyan
+        Install-Module -Name `$n -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
+    }
+    Write-Host 'Elevated install complete.' -ForegroundColor Green
+    exit 0
+}
+catch {
+    Write-Host "Elevated install failed: `$(`$_.Exception.Message)" -ForegroundColor Red
+    Read-Host 'Press Enter to close this elevated window'
+    exit 1
+}
+"@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
+    try {
+        $proc = Start-Process -FilePath $hostExe -Verb RunAs -PassThru -Wait `
+            -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) -ErrorAction Stop
+        return ($proc.ExitCode -eq 0)
+    }
+    catch {
+        # Most common cause: the user dismissed the UAC prompt.
+        Write-Host "   [FAIL] Elevation was cancelled or failed: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    }
+}
+
 function Resolve-RequiredModule {
     param([string]$CheckName, [string]$InstallName)
     if (Get-Module -ListAvailable -Name $CheckName) {
@@ -278,19 +335,52 @@ function Resolve-RequiredModule {
         return $true
     }
     Write-Host "   [MISS] $CheckName" -ForegroundColor Yellow
-    if (-not $NonInteractive) {
-        if (Read-YesNo -Prompt "          Install '$InstallName' now (Scope CurrentUser)?" -Default $true) {
-            try {
-                Install-Module -Name $InstallName -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
-                if (Get-Module -ListAvailable -Name $CheckName) {
-                    Write-Host "   [ OK ] Installed $CheckName" -ForegroundColor Green
-                    return $true
-                }
+
+    if ($NonInteractive) {
+        Write-Host "          Install manually: Install-Module $InstallName -Scope CurrentUser" -ForegroundColor Yellow
+        return $false
+    }
+    if (-not (Read-YesNo -Prompt "          Install '$InstallName' now?" -Default $true)) {
+        Write-Host "          Install manually: Install-Module $InstallName -Scope CurrentUser" -ForegroundColor Yellow
+        return $false
+    }
+
+    if (Test-IsAdministrator) {
+        # Elevated already -> install system-wide directly.
+        Write-Host "          Console is elevated - installing '$InstallName' (Scope AllUsers) ..." -ForegroundColor Cyan
+        try {
+            if (-not (Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue)) {
+                Install-PackageProvider -Name NuGet -Force -Scope AllUsers | Out-Null
             }
-            catch {
-                Write-Host "   [FAIL] Install failed: $($_.Exception.Message)" -ForegroundColor Red
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+            Install-Module -Name $InstallName -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
+        }
+        catch {
+            Write-Host "   [FAIL] Install failed: $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+    else {
+        # Not elevated -> offer to elevate the console for a system-wide install.
+        Write-Host "          Console is NOT running as Administrator - a system-wide install needs elevation." -ForegroundColor Yellow
+        if (Read-YesNo -Prompt "          Launch an elevated console to install '$InstallName' now?" -Default $true) {
+            if (Install-ModuleElevated -InstallName $InstallName) {
+                Write-Host "          Elevated install finished - re-checking availability ..." -ForegroundColor Cyan
             }
         }
+        elseif (Read-YesNo -Prompt "          Try a per-user install instead (Scope CurrentUser, no admin)?" -Default $true) {
+            try {
+                Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+                Install-Module -Name $InstallName -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+            }
+            catch {
+                Write-Host "   [FAIL] Per-user install failed: $($_.Exception.Message)" -ForegroundColor Red
+            }
+        }
+    }
+
+    if (Get-Module -ListAvailable -Name $CheckName) {
+        Write-Host "   [ OK ] Installed $CheckName" -ForegroundColor Green
+        return $true
     }
     Write-Host "          Install manually: Install-Module $InstallName -Scope CurrentUser" -ForegroundColor Yellow
     return $false
@@ -501,36 +591,6 @@ function Invoke-ProductRoleSetup {
 # =============================================================================
 Write-Banner 'Omnissa Horizon VDI + App Volumes - vCenter Roles & Permissions'
 
-# --- Select products (menu) ---------------------------------------------------
-$selectedKeys = $null
-if ($Mode) {
-    switch -Regex ($Mode) {
-        '^(AppVolumes|AV|1)$'        { $selectedKeys = @('AppVolumes') }
-        '^(InstantClone|IC|2)$'      { $selectedKeys = @('InstantClone') }
-        '^(Both|All|3)$'             { $selectedKeys = @('AppVolumes', 'InstantClone') }
-        default { throw "Mode must be 'AppVolumes', 'InstantClone' or 'Both' (got '$Mode')." }
-    }
-}
-elseif ($NonInteractive) {
-    throw 'No -Mode provided and NonInteractive is set.'
-}
-else {
-    Write-Section 'What would you like to set up?'
-    Write-Host "   [1] App Volumes" -ForegroundColor White
-    Write-Host "   [2] Horizon VDI (Instant Clone)" -ForegroundColor White
-    Write-Host "   [3] Both" -ForegroundColor White
-    Write-Host "   [4] Exit" -ForegroundColor White
-    $choice = Read-DefaultedValue -Prompt '   Select' -Default '3'
-    switch ($choice.Trim()) {
-        '1' { $selectedKeys = @('AppVolumes') }
-        '2' { $selectedKeys = @('InstantClone') }
-        '3' { $selectedKeys = @('AppVolumes', 'InstantClone') }
-        '4' { Write-Host "Aborted." -ForegroundColor DarkGray; return }
-        default { throw "Invalid selection '$choice'." }
-    }
-}
-Write-Host "Selected: $(( $selectedKeys | ForEach-Object { $Products[$_].DisplayName }) -join ' + ')" -ForegroundColor Cyan
-
 # --- Working directory and configuration --------------------------------------
 # Prefer the directory of the .ps1 file (config/credential live next to the
 # script). When run via 'irm <URL> | iex' there is no file -> fall back to the
@@ -558,12 +618,69 @@ $credentialPath = Join-Path -Path $WorkingDirectory -ChildPath 'vcenter-credenti
 Write-Section 'Configuration'
 Write-Host "Working directory: $WorkingDirectory" -ForegroundColor DarkGray
 
-# Load existing config.json (as defaults)
+# Load existing config.json - but only after asking whether it should be used.
+# Declining leaves the file on disk yet treats this run as a fresh start (the
+# file is still overwritten with the freshly entered values at the end).
 $config = $null
 if (Test-Path -LiteralPath $ConfigPath) {
-    try { $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json }
-    catch { Write-Host "Note: config.json unreadable, will be recreated ($($_.Exception.Message))." -ForegroundColor DarkYellow }
+    if ($NonInteractive -or (Read-YesNo -Prompt "Found an existing config.json - use its values as defaults?" -Default $true)) {
+        try {
+            $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+            Write-Host "Using existing configuration: $ConfigPath" -ForegroundColor DarkGray
+        }
+        catch { Write-Host "Note: config.json unreadable, will be recreated ($($_.Exception.Message))." -ForegroundColor DarkYellow }
+    }
+    else {
+        Write-Host "Ignoring existing config.json for this run (it will be overwritten with the new values)." -ForegroundColor DarkYellow
+    }
 }
+
+# --- Select products (menu) ---------------------------------------------------
+# If config.json is being used and already lists configured products, that set
+# is offered as the default menu selection.
+$cfgConfiguredKeys = @()
+if ($config -and $config.Products) {
+    foreach ($k in $Products.Keys) {
+        if ($config.Products.PSObject.Properties.Name -contains $k) { $cfgConfiguredKeys += $k }
+    }
+}
+
+$selectedKeys = $null
+if ($Mode) {
+    switch -Regex ($Mode) {
+        '^(AppVolumes|AV|1)$'        { $selectedKeys = @('AppVolumes') }
+        '^(InstantClone|IC|2)$'      { $selectedKeys = @('InstantClone') }
+        '^(Both|All|3)$'             { $selectedKeys = @('AppVolumes', 'InstantClone') }
+        default { throw "Mode must be 'AppVolumes', 'InstantClone' or 'Both' (got '$Mode')." }
+    }
+}
+elseif ($NonInteractive) {
+    if ($cfgConfiguredKeys.Count -gt 0) { $selectedKeys = $cfgConfiguredKeys }
+    else { throw 'No -Mode provided and NonInteractive is set.' }
+}
+else {
+    $menuDefault = if ($cfgConfiguredKeys.Count -eq 1) {
+                       if ($cfgConfiguredKeys[0] -eq 'AppVolumes') { '1' } else { '2' }
+                   }
+                   else { '3' }
+    Write-Section 'What would you like to set up?'
+    Write-Host "   [1] App Volumes" -ForegroundColor White
+    Write-Host "   [2] Horizon VDI (Instant Clone)" -ForegroundColor White
+    Write-Host "   [3] Both" -ForegroundColor White
+    Write-Host "   [4] Exit" -ForegroundColor White
+    if ($cfgConfiguredKeys.Count -gt 0) {
+        Write-Host "   (config.json currently holds: $(( $cfgConfiguredKeys | ForEach-Object { $Products[$_].DisplayName }) -join ' + '))" -ForegroundColor DarkGray
+    }
+    $choice = Read-DefaultedValue -Prompt '   Select' -Default $menuDefault
+    switch ($choice.Trim()) {
+        '1' { $selectedKeys = @('AppVolumes') }
+        '2' { $selectedKeys = @('InstantClone') }
+        '3' { $selectedKeys = @('AppVolumes', 'InstantClone') }
+        '4' { Write-Host "Aborted." -ForegroundColor DarkGray; return }
+        default { throw "Invalid selection '$choice'." }
+    }
+}
+Write-Host "Selected: $(( $selectedKeys | ForEach-Object { $Products[$_].DisplayName }) -join ' + ')" -ForegroundColor Cyan
 
 # vCenter connection settings: parameter > config.json > interactive prompt
 $cfgServer = if ($config -and $config.vCenter) { $config.vCenter.Server } else { $null }
